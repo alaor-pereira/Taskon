@@ -151,7 +151,7 @@ Com `NODE_ENV=production`, o backend se recusa a subir se faltar algo destes:
   trafega com `Secure`);
 - `BETTER_AUTH_SECRET` gerado, e não o valor do `.env.example`;
 - `RESEND_API_KEY` (sem ela, links de verificação e de redefinição de senha
-  iriam para o log).
+  iriam para o log)
 
 Também em produção:
 
