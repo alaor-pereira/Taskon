@@ -1,0 +1,781 @@
+// Taskon — modelo de dados
+//
+// Convenções:
+//   - Identificadores são UUID gerados pelo banco.
+//   - Timestamps em UTC (timestamptz), exceto `dueDate`, que é data pura.
+//   - Exclusão é lógica (deletedAt/deletedBy/deletionBatchId) para Projeto e Tarefa.
+//   - As tabelas de autenticação (User, Session, Account, Verification) seguem o
+//     contrato do Better Auth; campos extras do Taskon convivem em User.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Dois papéis (ver scripts/papeis-do-banco.sql): o servidor conecta por
+// DATABASE_URL com um papel que só lê e escreve dados; as migrações usam
+// DIRECT_URL, com o papel dono do schema.
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+/// Papel dentro de uma Equipe. Governa ações da equipe, não o conteúdo dos projetos.
+enum TeamRole {
+  GESTOR
+  MEMBRO
+  VISUALIZADOR
+}
+
+/// Papel dentro de um Projeto. Única origem de acesso ao conteúdo do projeto,
+/// salvo a exceção administrativa do GESTOR da equipe.
+enum ProjectRole {
+  OWNER
+  EDITOR
+  VIEWER
+}
+
+enum TaskStatus {
+  BACKLOG
+  A_FAZER
+  EM_ANDAMENTO
+  EM_REVISAO
+  EM_PAUSA
+  CONCLUIDO
+}
+
+enum TaskPriority {
+  ALTA
+  MEDIA
+  BAIXA
+}
+
+/// Dificuldade estimada de projeto ou tarefa. Opcional: nulo = "não estimada".
+enum Difficulty {
+  ROTINEIRO
+  COMPLEXO
+  CRITICO
+}
+
+enum EventKind {
+  ATIVIDADE
+  REUNIAO
+}
+
+enum ParticipantResponse {
+  PENDENTE
+  ACEITO
+  RECUSADO
+}
+
+enum EventExceptionKind {
+  CANCELADA
+  MODIFICADA
+}
+
+enum InvitationType {
+  EQUIPE
+  PROJETO
+}
+
+enum InvitationStatus {
+  PENDENTE
+  ACEITO
+  RECUSADO
+  EXPIRADO
+}
+
+enum ViewMode {
+  CARDS
+  KANBAN
+  LISTA
+}
+
+enum ViewEntityType {
+  PROJETO
+  TAREFA
+}
+
+/// Páginas de listagem que não pertencem a um recurso, mas têm visualização.
+enum ViewPage {
+  TODOS_PROJETOS
+  TODAS_TAREFAS
+}
+
+enum NotificationType {
+  CONVITE_EQUIPE
+  CONVITE_PROJETO
+  TAREFA_ATRIBUIDA
+  MENCAO_COMENTARIO
+  REUNIAO_AGENDADA
+  TAREFA_VENCENDO
+  TAREFA_DESATRIBUIDA
+  TAREFA_ATRASADA
+  COMENTARIO_NA_TAREFA
+  REUNIAO_ALTERADA
+  REUNIAO_CANCELADA
+  INTEGRACAO_DESCONECTADA
+}
+
+// ---------------------------------------------------------------------------
+// Identidade (contrato Better Auth + campos do Taskon)
+// ---------------------------------------------------------------------------
+
+model User {
+  id            String    @id @default(uuid()) @db.Uuid
+  name          String
+  email         String    @unique
+  emailVerified Boolean   @default(false)
+  image         String?
+
+  /// Fuso do usuário. Define o que é "hoje" em Vencem Hoje e na Agenda.
+  timezone      String    @default("America/Sao_Paulo")
+
+  /// Preenchido na exclusão de conta. Dados pessoais são apagados, o histórico fica.
+  anonymizedAt  DateTime?
+
+  /// Verificação em duas etapas (TOTP) ativa. Gerido pelo plugin twoFactor.
+  twoFactorEnabled Boolean? @default(false)
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  sessions           Session[]
+  accounts           Account[]
+  ownedTeams         Team[]                @relation("TeamOwner")
+  teamMemberships    TeamMember[]
+  ownedProjects      Project[]             @relation("ProjectOwner")
+  projectMemberships ProjectMember[]
+  createdTasks       Task[]                @relation("TaskCreatedBy")
+  updatedTasks       Task[]                @relation("TaskUpdatedBy")
+  updatedProjects    Project[]             @relation("ProjectUpdatedBy")
+  assignedTasks      TaskAssignee[]
+  comments           Comment[]
+  mentions           CommentMention[]
+  ownedEvents        CalendarEvent[]       @relation("EventOwner")
+  eventParticipation EventParticipant[]
+  sentInvitations    Invitation[]          @relation("InvitationSender")
+  receivedInvitations Invitation[]         @relation("InvitationRecipient")
+  notifications      Notification[]
+  activityLog        ActivityLog[]
+  viewPreferences    UserViewPreference[]
+  pageViewPreferences UserPageViewPreference[]
+  avatar             UserAvatar?
+  notificationPreferences NotificationPreference[]
+  termsAcceptances   TermsAcceptance[]
+  twoFactors         TwoFactor[]
+  googleIntegration  GoogleIntegration?
+  googleEventSyncs   GoogleEventSync[]
+
+  @@index([anonymizedAt])
+  @@map("users")
+}
+
+/// De onde veio o aceite: o checkbox do cadastro ou o diálogo exibido no app
+/// a quem ainda não aceitou a versão vigente.
+enum TermsAcceptanceOrigin {
+  CADASTRO
+  REACEITE
+}
+
+/// Prova do aceite dos Termos de uso e da ciência da Política de privacidade
+/// (LGPD, art. 8º §2º: o ônus da prova é do controlador). Só recebe inserções
+/// e sobrevive à anonimização da conta, como registro de cumprimento de
+/// obrigação legal (art. 16, I).
+model TermsAcceptance {
+  id         String                @id @default(uuid()) @db.Uuid
+  userId     String                @db.Uuid
+  /// Versão dos documentos aceita, no formato AAAA-MM-DD (ver config/legal.ts).
+  version    String
+  origin     TermsAcceptanceOrigin
+  ipAddress  String?
+  userAgent  String?
+  acceptedAt DateTime              @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([userId, acceptedAt])
+  @@map("terms_acceptances")
+}
+
+/// Foto do perfil enviada pelo próprio usuário, guardada em binário. O
+/// `User.image` aponta para o endpoint que a serve (com versão na URL); a
+/// imagem não vai no campo `image` porque ele entra no cookie de sessão.
+model UserAvatar {
+  userId    String   @id @db.Uuid
+  data      Bytes
+  mimeType  String
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_avatars")
+}
+
+/// Avisos que o usuário desligou (opt-out): sem linha, ele recebe. A chave é
+/// o tipo da notificação ou, nos tipos que agrupam vários eventos, "GRUPO:EVENTO"
+/// (ver notification-keys.ts).
+model NotificationPreference {
+  userId String @db.Uuid
+  chave  String
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, chave])
+  @@map("notification_preferences")
+}
+
+model Session {
+  id        String   @id @default(uuid()) @db.Uuid
+  token     String   @unique
+  userId    String   @db.Uuid
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+/// Credenciais locais (hash argon2id em `password`) e contas sociais (Google, GitHub).
+model Account {
+  id                    String    @id @default(uuid()) @db.Uuid
+  userId                String    @db.Uuid
+  accountId             String
+  providerId            String
+  accessToken           String?
+  refreshToken          String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  idToken               String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, accountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+/// Segundo fator (TOTP) do plugin twoFactor do Better Auth. O segredo e os
+/// códigos de backup são gravados cifrados pelo próprio plugin, com a chave
+/// derivada de BETTER_AUTH_SECRET.
+model TwoFactor {
+  id                      String    @id @default(uuid()) @db.Uuid
+  userId                  String    @db.Uuid
+  secret                  String
+  backupCodes             String
+  verified                Boolean?  @default(true)
+  /// Travamento próprio do plugin contra adivinhação do código.
+  failedVerificationCount Int?      @default(0)
+  lockedUntil             DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([secret])
+  @@index([userId])
+  @@map("two_factors")
+}
+
+/// Tokens de verificação de e-mail e de recuperação de senha.
+model Verification {
+  id         String   @id @default(uuid()) @db.Uuid
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+  @@map("verifications")
+}
+
+// ---------------------------------------------------------------------------
+// Equipes
+// ---------------------------------------------------------------------------
+
+model Team {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String
+  description String?
+
+  /// Dono final. A equipe nunca fica sem dono: só transfere.
+  ownerId     String   @db.Uuid
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  owner       User         @relation("TeamOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  members     TeamMember[]
+  projects    Project[]
+  invitations Invitation[]
+
+  @@index([ownerId])
+  @@map("teams")
+}
+
+model TeamMember {
+  id        String   @id @default(uuid()) @db.Uuid
+  teamId    String   @db.Uuid
+  userId    String   @db.Uuid
+  role      TeamRole
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, userId])
+  @@index([userId, role])
+  @@map("team_members")
+}
+
+// ---------------------------------------------------------------------------
+// Projetos
+// ---------------------------------------------------------------------------
+
+model Project {
+  id          String  @id @default(uuid()) @db.Uuid
+  name        String
+  description String?
+
+  ownerId     String  @db.Uuid
+  /// Nulo em projeto pessoal. Preenchido em projeto de equipe.
+  teamId      String? @db.Uuid
+
+  /// Caixa de entrada pessoal: uma por usuário, não excluível, não compartilhável.
+  isInbox     Boolean @default(false)
+
+  /// Etapa do projeto no kanban de projetos — mesmo enum da tarefa, editada
+  /// manualmente (arrastando no kanban ou pelo diálogo de editar projeto).
+  status      TaskStatus @default(A_FAZER)
+
+  priority    TaskPriority @default(MEDIA)
+  /// Nulo quando ninguém estimou — não inventamos um nível.
+  difficulty  Difficulty?
+  /// Prazo do projeto: data pura, como o vencimento da tarefa.
+  dueDate     DateTime?    @db.Date
+
+  /// Quem alterou o próprio projeto por último (não as tarefas dele).
+  updatedById String? @db.Uuid
+
+  deletedAt        DateTime?
+  deletedBy        String?   @db.Uuid
+  /// Agrupa o que foi excluído na mesma operação, para restaurar exatamente esse lote.
+  deletionBatchId  String?   @db.Uuid
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  owner       User            @relation("ProjectOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  updatedBy   User?           @relation("ProjectUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+  team        Team?           @relation(fields: [teamId], references: [id], onDelete: Restrict)
+  members     ProjectMember[]
+  tasks       Task[]
+  events      CalendarEvent[]
+  invitations Invitation[]
+  activityLog ActivityLog[]
+
+  @@index([ownerId, deletedAt])
+  @@index([teamId, deletedAt])
+  @@index([deletedAt])
+  @@index([deletionBatchId])
+  @@map("projects")
+}
+
+model ProjectMember {
+  id        String      @id @default(uuid()) @db.Uuid
+  projectId String      @db.Uuid
+  userId    String      @db.Uuid
+  role      ProjectRole
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, userId])
+  @@index([userId])
+  @@map("project_members")
+}
+
+// ---------------------------------------------------------------------------
+// Tarefas
+// ---------------------------------------------------------------------------
+
+model Task {
+  id          String  @id @default(uuid()) @db.Uuid
+  projectId   String  @db.Uuid
+  /// Subtarefa: aponta para uma tarefa sem pai. Um nível apenas.
+  parentId    String? @db.Uuid
+
+  title       String
+  description String?
+
+  status   TaskStatus   @default(A_FAZER)
+  priority TaskPriority @default(MEDIA)
+  /// Nulo quando ninguém estimou — não inventamos um nível.
+  difficulty Difficulty?
+
+  /// Data pura, sem hora e sem fuso. "Hoje" é resolvido pelo fuso do usuário.
+  dueDate     DateTime? @db.Date
+  /// Ordem dentro da coluna do Kanban.
+  position    Float     @default(0)
+  /// Preenchido ao entrar em CONCLUIDO, limpo ao sair.
+  completedAt DateTime?
+
+  /// Controle de conflito otimista: toda escrita exige a versão lida.
+  version     Int       @default(1)
+
+  createdById String  @db.Uuid
+  updatedById String? @db.Uuid
+
+  deletedAt       DateTime?
+  deletedBy       String?   @db.Uuid
+  deletionBatchId String?   @db.Uuid
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  project   Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  parent    Task?          @relation("TaskSubtasks", fields: [parentId], references: [id], onDelete: Cascade)
+  subtasks  Task[]         @relation("TaskSubtasks")
+  createdBy User           @relation("TaskCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  updatedBy User?          @relation("TaskUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+  assignees TaskAssignee[]
+  comments  Comment[]
+  events    CalendarEvent[]
+
+  @@index([projectId, deletedAt])
+  @@index([projectId, status, position])
+  @@index([parentId])
+  @@index([dueDate, status])
+  @@index([deletionBatchId])
+  @@map("tasks")
+}
+
+model TaskAssignee {
+  taskId     String   @db.Uuid
+  userId     String   @db.Uuid
+  assignedAt DateTime @default(now())
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, userId])
+  @@index([userId])
+  @@map("task_assignees")
+}
+
+model Comment {
+  id       String  @id @default(uuid()) @db.Uuid
+  taskId   String  @db.Uuid
+  authorId String  @db.Uuid
+  bodyMd   String
+
+  editedAt  DateTime?
+  deletedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  task     Task             @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  author   User             @relation(fields: [authorId], references: [id], onDelete: Restrict)
+  mentions CommentMention[]
+
+  @@index([taskId, createdAt])
+  @@index([authorId])
+  @@map("comments")
+}
+
+model CommentMention {
+  commentId String @db.Uuid
+  userId    String @db.Uuid
+
+  comment Comment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([commentId, userId])
+  @@index([userId])
+  @@map("comment_mentions")
+}
+
+// ---------------------------------------------------------------------------
+// Agenda: atividades e reuniões
+// ---------------------------------------------------------------------------
+
+/// Atividade (pessoal) e Reunião (com participantes) no mesmo modelo.
+/// Atividades NÃO são tarefas de projeto e nunca aparecem nas listas de tarefas.
+model CalendarEvent {
+  id          String    @id @default(uuid()) @db.Uuid
+  kind        EventKind
+  /// Criador. Em reunião, é o organizador.
+  ownerId     String    @db.Uuid
+
+  title          String
+  description    String?
+  locationOrLink String?
+  /// Link do Google Meet, gerado pela agenda Google do organizador.
+  meetLink       String?
+
+  startsAt DateTime
+  endsAt   DateTime
+  allDay   Boolean  @default(false)
+  /// Fuso em que o evento foi criado, para expandir a recorrência corretamente.
+  timezone String
+
+  /// Regra de recorrência no padrão iCalendar (ex.: FREQ=WEEKLY;BYDAY=MO,WE).
+  /// Ocorrências são calculadas sob demanda; não há uma linha por dia.
+  rrule String?
+
+  /// Vínculo opcional. Só é exibido a quem ainda tem acesso ao projeto.
+  taskId    String? @db.Uuid
+  projectId String? @db.Uuid
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  owner        User               @relation("EventOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  task         Task?              @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  project      Project?           @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  participants EventParticipant[]
+  exceptions   EventException[]
+  googleSyncs  GoogleEventSync[]
+
+  @@index([ownerId, startsAt])
+  @@index([kind, startsAt])
+  @@index([projectId])
+  @@map("calendar_events")
+}
+
+model EventParticipant {
+  eventId  String              @db.Uuid
+  userId   String              @db.Uuid
+  /// A resposta vale para a série inteira.
+  response ParticipantResponse @default(PENDENTE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  event CalendarEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  user  User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([eventId, userId])
+  @@index([userId])
+  @@map("event_participants")
+}
+
+/// Ocorrência alterada ou cancelada dentro de uma série recorrente ("só esta").
+model EventException {
+  id            String             @id @default(uuid()) @db.Uuid
+  eventId       String             @db.Uuid
+  /// Início original da ocorrência afetada, usado como chave da exceção.
+  originalStart DateTime
+  kind          EventExceptionKind
+  /// Campos sobrescritos quando kind = MODIFICADA.
+  overrides     Json?
+
+  createdAt DateTime @default(now())
+
+  event CalendarEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, originalStart])
+  @@map("event_exceptions")
+}
+
+// ---------------------------------------------------------------------------
+// Convites, notificações, histórico e preferências
+// ---------------------------------------------------------------------------
+
+model Invitation {
+  id   String         @id @default(uuid()) @db.Uuid
+  type InvitationType
+
+  teamId    String? @db.Uuid
+  projectId String? @db.Uuid
+
+  email String
+  /// Preenchido quando o convidado já possui conta.
+  invitedUserId String? @db.Uuid
+
+  /// Papel concedido ao aceitar: TeamRole ou ProjectRole conforme `type`.
+  role String
+
+  /// Só o hash do token é guardado; o token puro vai no link do e-mail.
+  tokenHash String           @unique
+  status    InvitationStatus @default(PENDENTE)
+
+  invitedById String   @db.Uuid
+  expiresAt   DateTime
+  respondedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  team        Team?    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  project     Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  invitedBy   User     @relation("InvitationSender", fields: [invitedById], references: [id], onDelete: Cascade)
+  invitedUser User?    @relation("InvitationRecipient", fields: [invitedUserId], references: [id], onDelete: SetNull)
+
+  @@index([email, status])
+  @@index([teamId])
+  @@index([projectId])
+  @@index([invitedUserId, status])
+  @@map("invitations")
+}
+
+model Notification {
+  id      String           @id @default(uuid()) @db.Uuid
+  userId  String           @db.Uuid
+  type    NotificationType
+  payload Json
+
+  readAt DateTime?
+
+  /// Impede notificar duas vezes o mesmo fato (ex.: vencimento de uma tarefa no dia).
+  dedupeKey String?
+
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, readAt, createdAt])
+  @@map("notifications")
+}
+
+/// Histórico de alterações. Alimenta a "última alteração" do Header, o "Recentes"
+/// e as notificações. Escrito pelo backend, nunca pelo cliente.
+model ActivityLog {
+  id         String  @id @default(uuid()) @db.Uuid
+  entityType String
+  entityId   String  @db.Uuid
+  /// Desnormalizado para filtrar o "Recentes" por projetos acessíveis sem joins extras.
+  projectId  String? @db.Uuid
+
+  actorId String @db.Uuid
+  action  String
+
+  before Json?
+  after  Json?
+
+  createdAt DateTime @default(now())
+
+  actor   User     @relation(fields: [actorId], references: [id], onDelete: Cascade)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([entityType, entityId, createdAt])
+  @@index([projectId, createdAt])
+  @@index([actorId, createdAt])
+  @@map("activity_log")
+}
+
+/// Visualização escolhida (Cards, Kanban, Lista) por usuário e por página.
+/// Persistida no banco para acompanhar o usuário entre dispositivos.
+model UserViewPreference {
+  userId     String         @db.Uuid
+  entityType ViewEntityType
+  entityId   String         @db.Uuid
+  view       ViewMode
+
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, entityType, entityId])
+  @@map("user_view_preferences")
+}
+
+/// Visualização das páginas de listagem ("Todos os projetos", "Todas as
+/// tarefas"). Separada da de cima porque essas páginas não têm um recurso —
+/// um id fictício na chave esconderia isso.
+model UserPageViewPreference {
+  userId String   @db.Uuid
+  page   ViewPage
+  view   ViewMode
+
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, page])
+  @@map("user_page_view_preferences")
+}
+
+// ---------------------------------------------------------------------------
+// Integração com o Google Agenda (só Taskon → Google)
+// ---------------------------------------------------------------------------
+
+enum GoogleIntegrationStatus {
+  ATIVA
+  /// O Google recusou o token (acesso revogado ou expirado): precisa conectar de novo.
+  PRECISA_RECONECTAR
+}
+
+enum GoogleSyncStatus {
+  PENDENTE
+  SINCRONIZADO
+  /// O evento saiu da agenda desta pessoa (excluído, recusado, removido).
+  REMOVER
+  /// Desistimos depois de várias tentativas.
+  ERRO
+}
+
+/// Conexão de uma pessoa com uma conta Google, separada do login: pode ser
+/// qualquer conta Google e não vira forma de entrar no Taskon. Os tokens são
+/// gravados cifrados (chave derivada de BETTER_AUTH_SECRET).
+model GoogleIntegration {
+  id                   String                  @id @default(uuid()) @db.Uuid
+  userId               String                  @unique @db.Uuid
+  googleEmail          String
+  accessToken          String
+  refreshToken         String
+  accessTokenExpiresAt DateTime
+  scope                String
+  /// Agenda "Taskon" criada pelo app na conta Google. É a única que acessamos.
+  calendarId           String
+  status               GoogleIntegrationStatus @default(ATIVA)
+  /// Quando a pessoa consentiu com o envio dos dados ao Google (LGPD, art. 7º, I).
+  consentAt            DateTime
+  lastSyncAt           DateTime?
+  lastError            String?
+  createdAt            DateTime                @default(now())
+  updatedAt            DateTime                @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("google_integrations")
+}
+
+/// Fila e mapa da sincronização: uma linha por evento e por pessoa que deve
+/// (ou deixou de dever) tê-lo na agenda Google. O evento pode sumir antes de
+/// a remoção chegar ao Google, por isso `eventId` fica nulo e a linha resiste.
+model GoogleEventSync {
+  id            String           @id @default(uuid()) @db.Uuid
+  userId        String           @db.Uuid
+  eventId       String?          @db.Uuid
+  googleEventId String?
+  status        GoogleSyncStatus @default(PENDENTE)
+  tentativas    Int              @default(0)
+  lastError     String?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  user  User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  event CalendarEvent? @relation(fields: [eventId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, eventId])
+  @@index([status, updatedAt])
+  @@map("google_event_syncs")
+}

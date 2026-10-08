@@ -1,0 +1,18 @@
+node_modules
+dist
+coverage
+*.tsbuildinfo
+
+# Segredos ficam no ambiente do container, nunca na imagem.
+.env*
+
+tests
+vitest.config.ts
+tsconfig.test.json
+prisma/seed.ts
+
+Dockerfile
+.dockerignore
+.git
+.gitignore
+*.md

@@ -1,0 +1,96 @@
+/**
+ * FullCalendar v7 reskin.
+ *
+ * Esta versão não usa mais as variáveis `--fc-*` documentadas nas versões
+ * antigas — vem com um sistema de temas plugáveis (classic/monarch/breezy/
+ * forma/pulse), cada um com sua própria paleta de variáveis (`--fc-classic-*`
+ * no caso do tema "classic", usado aqui). Como cada variável abaixo é uma
+ * *referência* (`var(--token-do-app)`), o claro/escuro já vem de graça: no
+ * modo escuro `--primary` etc. já mudam de valor no `:root.dark` de
+ * `globals.css`, e essa mudança se propaga. A exceção é o fundo do dia de
+ * hoje, cuja dose de azul muda com o tema (bloco `.dark` abaixo).
+ *
+ * A barra de ferramentas do FullCalendar não é usada: a Agenda tem a própria,
+ * com os componentes do sistema (ver `agenda-view.tsx`).
+ */
+@import "@fullcalendar/react/skeleton.css";
+@import "@fullcalendar/react/themes/classic/theme.css";
+@import "@fullcalendar/react/themes/classic/palette.css";
+
+:root {
+  /* botões da barra de ferramentas (hoje, dia/semana/mês/ano): neutros no
+   * canvas, e só o selecionado ganha o azul — o único acento do DS. */
+  --fc-classic-button: var(--background);
+  --fc-classic-button-border: var(--border);
+  --fc-classic-button-strong: var(--primary);
+  --fc-classic-button-strong-border: var(--primary);
+  --fc-classic-button-outline: var(--ring);
+  --fc-classic-button-foreground: var(--foreground);
+
+  /* cor primária: título selecionado, foco */
+  --fc-classic-primary: var(--primary);
+  --fc-classic-primary-foreground: var(--primary-foreground);
+
+  /* eventos e destaques */
+  --fc-classic-event: var(--primary);
+  --fc-classic-event-contrast: var(--primary-foreground);
+  --fc-classic-highlight: var(--accent);
+  /* hoje: o azul do sistema, bem diluído */
+  --fc-classic-today: color-mix(in oklch, var(--primary) 8%, transparent);
+  --fc-classic-now: var(--destructive);
+
+  /* superfícies neutras */
+  --fc-classic-background: var(--background);
+  --fc-classic-faint: var(--muted);
+  --fc-classic-muted: var(--muted);
+  --fc-classic-strong: var(--border);
+
+  /* texto neutro */
+  --fc-classic-foreground: var(--foreground);
+  --fc-classic-faint-foreground: var(--muted-foreground);
+  --fc-classic-muted-foreground: var(--muted-foreground);
+
+  /* bordas */
+  --fc-classic-border: var(--border);
+  --fc-classic-strong-border: var(--border);
+}
+
+/* No escuro, a mesma diluição some no fundo: o azul precisa de mais dose. */
+.dark {
+  --fc-classic-today: color-mix(in oklch, var(--primary) 16%, transparent);
+}
+
+/*
+ * Classes que a Agenda passa ao FullCalendar (`dayCellTopInnerClass` etc.).
+ * Ficam aqui, fora das camadas do Tailwind e depois do tema: utilitários do
+ * Tailwind (em `@layer`) perderiam para o CSS do tema, que não tem camada.
+ */
+
+/* Número do dia de hoje, no Mês, no Ano e no cabeçalho de Semana/Dia.
+ * `--link` é o azul de texto: o mesmo do primary no claro, mais aceso no
+ * escuro, onde o primary perderia contraste. */
+.agenda-hoje-numero {
+  color: var(--link);
+  font-weight: 600;
+}
+
+/* Visão Mês: dias de fora do mês levemente apagados — fundo, número e
+ * eventos. Os eventos continuam clicáveis. */
+.agenda-outro-mes {
+  background-color: color-mix(in oklch, var(--muted) 55%, transparent);
+}
+.agenda-outro-mes-numero,
+.agenda-evento-outro-mes {
+  opacity: 0.5;
+}
+
+/* Visão Mês: o ícone do tipo do evento toma o lugar da bolinha. */
+.agenda-sem-bolinha {
+  display: none;
+}
+
+/* Visão Ano: cada mês é um cartão, com o raio dos cards do sistema. */
+.agenda-mes-card {
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}

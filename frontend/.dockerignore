@@ -1,0 +1,19 @@
+node_modules
+.next
+out
+build
+coverage
+*.tsbuildinfo
+next-env.d.ts
+
+# Nenhum .env entra na imagem: o .env.local de desenvolvimento seria
+# embutido no build e apontaria a interface para localhost.
+.env*
+
+Dockerfile
+.dockerignore
+.git
+.gitignore
+AGENTS.md
+CLAUDE.md
+*.md

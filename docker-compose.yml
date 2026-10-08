@@ -1,0 +1,35 @@
+# PostgreSQL para desenvolvimento e testes.
+#
+#   docker compose up -d
+#
+# Cria dois bancos: taskon_dev (aplicação) e taskon_test (testes).
+# Os testes apagam todas as tabelas entre execuções, por isso o banco separado.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: taskon-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: taskon
+      POSTGRES_PASSWORD: taskon
+      POSTGRES_DB: taskon_dev
+    ports:
+      # 5434 no host, e não 5432: outros projetos costumam ocupar a porta
+      # padrão do PostgreSQL, e o container não sobe se ela estiver tomada.
+      # Dentro do container, a porta continua sendo 5432.
+      # Só na interface local: sem o 127.0.0.1, o Docker publica a porta em
+      # todas as interfaces e o banco fica acessível pela rede.
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - taskon-pgdata:/var/lib/postgresql/data
+      - ./scripts/criar-banco-de-teste.sql:/docker-entrypoint-initdb.d/10-teste.sql:ro
+      - ./scripts/papeis-do-banco.sql:/docker-entrypoint-initdb.d/20-papeis.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U taskon -d taskon_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  taskon-pgdata:

@@ -1,0 +1,108 @@
+# Produção (Coolify, build pack "Docker Compose").
+#
+# No Coolify:
+#   - Docker Compose Location: /docker-compose.prod.yml
+#   - Domínios, no mesmo domínio registrado (o cookie de sessão é SameSite=Lax):
+#       frontend  https://app.seu-dominio.com
+#       backend   https://api.seu-dominio.com:3000   (":3000" diz ao Coolify a porta do container)
+#   - Preencha as variáveis abaixo na aba Environment Variables. As marcadas
+#     com ":?" são obrigatórias; as com ":-" têm padrão.
+#
+# Gere os segredos com:  openssl rand -hex 32
+# Use senhas só com letras e números: elas entram em URLs de conexão.
+#
+# O docker-compose.yml da raiz continua sendo o de desenvolvimento.
+
+services:
+  postgres:
+    build: ./docker/postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: taskon
+      POSTGRES_DB: taskon
+      # Dono do schema (migrações). Só vale na criação do volume.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      # Senha do papel taskon_app, usado pelo servidor. Só vale na criação do volume.
+      APP_DB_PASSWORD: ${POSTGRES_APP_PASSWORD:?}
+    volumes:
+      - taskon-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U taskon -d taskon"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    expose:
+      - "3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgresql://taskon_app:${POSTGRES_APP_PASSWORD:?}@postgres:5432/taskon?schema=public
+      DIRECT_URL: postgresql://taskon:${POSTGRES_PASSWORD:?}@postgres:5432/taskon?schema=public
+      # Origem pública da API, com https (ex.: https://api.seu-dominio.com).
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL:?}
+      # Origem pública do frontend, com https (ex.: https://app.seu-dominio.com).
+      FRONTEND_URL: ${FRONTEND_URL:?}
+      # Mínimo de 32 caracteres.
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?}
+      # Proxies na frente da API: 1 para o Traefik do Coolify; 2 se houver
+      # também o proxy da Cloudflare (nuvem laranja).
+      TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-1}
+      # E-mail: remetente de um domínio verificado no Resend.
+      RESEND_API_KEY: ${RESEND_API_KEY:?}
+      MAIL_FROM: ${MAIL_FROM:?}
+      # Mínimo de 16 caracteres. Compartilhado com o serviço "cron".
+      CRON_SECRET: ${CRON_SECRET:?}
+      # Login social e Google Agenda (opcionais: vazios desligam o provedor).
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Embutida no build: a interface chama a API por esta URL.
+        NEXT_PUBLIC_API_URL: ${BETTER_AUTH_URL:?}
+    restart: unless-stopped
+    expose:
+      - "80"
+    # Deixa o processo sem root escutar na porta 80.
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: 0
+    depends_on:
+      - backend
+
+  # Rotinas agendadas (vencimentos, purga da lixeira, convites expirados e
+  # reenvio ao Google Agenda) a cada 10 minutos. Repetir é seguro.
+  cron:
+    image: node:22-alpine
+    restart: unless-stopped
+    environment:
+      CRON_SECRET: ${CRON_SECRET:?}
+    command:
+      - node
+      - -e
+      - |
+        const rodar = () =>
+          fetch("http://backend:3000/api/cron/rodar", {
+            method: "POST",
+            headers: { authorization: "Bearer " + process.env.CRON_SECRET },
+          })
+            .then((r) => console.log(new Date().toISOString(), "cron", r.status))
+            .catch((e) => console.error(new Date().toISOString(), "cron falhou:", e.message));
+        setTimeout(rodar, 60_000);
+        setInterval(rodar, 10 * 60_000);
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  taskon-pgdata:

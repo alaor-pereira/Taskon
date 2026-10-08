@@ -1,0 +1,2 @@
+# Scripts de shell rodam em Linux: CRLF quebraria o sh.
+*.sh text eol=lf
