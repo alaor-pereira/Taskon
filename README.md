@@ -164,25 +164,37 @@ Também em produção:
 
 ### Deploy com Docker Compose (Coolify)
 
-`docker-compose.prod.yml` sobe quatro serviços, sem portas publicadas:
+`docker-compose.prod.yml` sobe três serviços, sem portas publicadas:
 
 | Serviço | Porta interna | Papel |
 |---|---|---|
 | `frontend` | 80 | Next.js (standalone) |
 | `backend` | 3000 | API; aplica as migrações ao subir |
-| `postgres` | 5432 | Banco, já com o papel `taskon_app` (`docker/postgres/`) |
 | `cron` | — | Chama `POST /api/cron/rodar` a cada 10 minutos |
 
-No Coolify, aponte o *Docker Compose Location* para `/docker-compose.prod.yml`
-e dê aos serviços domínios do mesmo domínio registrado (o cookie de sessão é
-`SameSite=Lax`): `https://app.seu-dominio.com` no `frontend` e
-`https://api.seu-dominio.com:3000` no `backend`. As variáveis estão descritas
-no próprio arquivo; gere os segredos com `openssl rand -hex 32`.
+O banco é um PostgreSQL gerenciado pelo Coolify, no mesmo servidor. O
+`backend` entra na rede `coolify` para alcançá-lo pelo host interno.
+
+1. Crie o banco no Coolify. A *Postgres URL (internal)* dele, com
+   `?schema=public` no fim, é a `DIRECT_URL` (dono do schema, só migrações).
+2. Antes do primeiro deploy, crie o papel do servidor com uma senha nova:
+
+   ```bash
+   psql "<DIRECT_URL>" -v senha=<senha_do_taskon_app> -f scripts/papeis-producao.sql
+   ```
+
+   A `DATABASE_URL` é a mesma URL com `taskon_app:<senha_do_taskon_app>` no
+   lugar do usuário e da senha.
+3. Aponte o *Docker Compose Location* para `/docker-compose.prod.yml` e dê aos
+   serviços domínios do mesmo domínio registrado (o cookie de sessão é
+   `SameSite=Lax`): `https://app.seu-dominio.com` no `frontend` e
+   `https://api.seu-dominio.com:3000` no `backend`. As variáveis estão
+   descritas no próprio arquivo; gere os segredos com `openssl rand -hex 32`.
 
 - `BETTER_AUTH_URL` também vira a URL da API no frontend, **durante o build**:
   ao trocá-la, faça um novo deploy (não basta reiniciar).
-- As senhas do Postgres só valem na criação do volume. Use apenas letras e
-  números, porque entram nas URLs de conexão.
+- Use senhas do banco só com letras e números, porque entram nas URLs de
+  conexão.
 - Nos provedores OAuth, os callbacks passam a ser
   `https://api.seu-dominio.com/api/auth/callback/{google,github}` e
   `https://api.seu-dominio.com/api/integracoes/google/callback`.
